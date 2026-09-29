@@ -206,12 +206,13 @@
               <p>AWS, Terraform, Python, JavaScript, HTML/CSS</p>
             </div>
             <div class="body">
-              <h3><a href="CF-IP">Cloud Resume Challenge</a></h3>
+              <h3><a href="https://github.com/Nayeraneru/cloud-resume-challenge">Cloud Resume Challenge</a></h3>
               <ul>
                 <li>Provisioned the full serverless stack (<strong>S3</strong>, <strong>CloudFront</strong>, <strong>API Gateway</strong>, <strong>Lambda</strong>, <strong>DynamoDB</strong>) as <strong>Infrastructure as Code</strong> using <strong>Terraform</strong>, replacing manual console configuration.</li>
-                <li>Built a serverless <strong>REST API</strong> (API Gateway + Lambda) in <strong>Python</strong> that reads/writes a visitor count in <strong>DynamoDB</strong>, called from a <strong>JavaScript</strong> front end.</li>
-                <li>Wrote <strong>Python</strong> unit tests for the Lambda backend to validate request handling and database logic before deployment.</li>
-                <li>Distributed the static resume site globally over <strong>HTTPS</strong> via a <strong>CloudFront</strong> CDN backed by <strong>S3</strong>.</li>
+                <li>Built a serverless <strong>HTTP API</strong> (API Gateway + Lambda) in <strong>Python</strong> that atomically increments a visitor count in <strong>DynamoDB</strong>, called from a <strong>JavaScript</strong> front end.</li>
+                <li>Implemented least-privilege <strong>IAM</strong> across the stack, scoping the Lambda execution role and CI/CD deploy role to only the specific resources and actions each requires.</li>
+                <li>Automated frontend deployment with a <strong>GitHub Actions</strong> CI/CD pipeline authenticated via <strong>OIDC federation</strong>, removing long-lived AWS credentials from the pipeline entirely.</li>
+                <li>Distributed the static resume site globally over <strong>HTTPS</strong> via a <strong>CloudFront</strong> CDN backed by a private <strong>S3</strong> bucket secured with <strong>Origin Access Control</strong>.</li>
                 <li>Set up <strong>CloudWatch</strong> monitoring with <strong>SNS</strong>-based alerting integrated into <strong>Slack</strong> for real-time operational visibility.</li>
               </ul>
             </div>
