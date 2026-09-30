@@ -1,6 +1,6 @@
 # Cloud Resume Challenge — AWS
 
-A serverless personal resume site with a live visitor counter, built to the [Cloud Resume Challenge](https://cloudresumechallenge.dev/docs/the-challenge/aws/) spec: static frontend on S3/CloudFront, a Python Lambda + DynamoDB backend behind API Gateway, all provisioned as Terraform, deployed through GitHub Actions using OIDC — no long-lived AWS credentials anywhere.
+A serverless personal resume site with a live visitor counter, built to the [Cloud Resume Challenge](https://cloudresumechallenge.dev/docs/the-challenge/aws/) spec: static frontend on S3/CloudFront, a Python Lambda + DynamoDB backend behind API Gateway, all provisioned as Terraform, deployed through GitHub Actions using OIDC, and monitored with CloudWatch alarms that page a Slack channel via SNS — no long-lived AWS credentials anywhere.
 
 **Live site:** [https://d1ls75i2eksje9.cloudfront.net](https://d1ls75i2eksje9.cloudfront.net)
 
@@ -17,12 +17,21 @@ flowchart LR
     Visitor -->|POST /count| APIGW[API Gateway — HTTP API]
     APIGW --> Lambda[Lambda — Python 3.12]
     Lambda -->|UpdateItem| DDB[(DynamoDB — on-demand)]
-
+ 
     GH[GitHub Actions] -->|OIDC, no static keys| S3
     GH -->|CreateInvalidation| CF
+ 
+    Lambda -.->|Errors metric| Alarm1[CW Alarm: errors]
+    APIGW -.->|Latency metric| Alarm2[CW Alarm: latency anomaly]
+    Lambda -.->|Invocations metric| Alarm3[CW Alarm: invocation anomaly]
+    Alarm1 --> SNS[SNS Topic: alerts]
+    Alarm2 --> SNS
+    Alarm3 --> SNS
+    SNS --> NotifyLambda[Lambda: notify-slack]
+    NotifyLambda -->|webhook POST| Slack
 ```
 
-The static site (S3 + CloudFront) and the counter API (API Gateway + Lambda + DynamoDB) are independent — the site works even if the counter API is down, it just shows "unavailable."
+The static site (S3 + CloudFront), the counter API (API Gateway + Lambda + DynamoDB), and monitoring (CloudWatch + SNS + notify-slack) are independent layers — the site works even if the counter API is down, and the counter works even if an alarm fails to reach Slack.
 
 ## Tech stack
 
@@ -32,39 +41,22 @@ The static site (S3 + CloudFront) and the counter API (API Gateway + Lambda + Dy
 | API | API Gateway HTTP API | Cheaper and simpler than REST API for a single Lambda-proxy route |
 | Compute | Lambda, Python 3.12 | Pay-per-invocation, no idle server for a low-traffic personal site |
 | Data | DynamoDB, on-demand capacity | Traffic is unpredictable and low-volume; no capacity to provision or guess |
+| Monitoring & alerting | CloudWatch Alarms + SNS + Lambda → Slack webhook | Real-time incident visibility without a paid third-party monitoring tool |
 | IaC | Terraform | Reviewable, reproducible infra; no manual console drift |
 | CI/CD | GitHub Actions + OIDC federation | Short-lived, per-run AWS credentials — nothing stored in GitHub secrets |
 
-## Repo structure
-
-```
-cloud-resume-challenge/
-├── .github/workflows/
-│   └── frontend.yml       # syncs site/ to S3 and invalidates CloudFront on push
-├── infra/                 # all Terraform
-│   ├── versions.tf        # Terraform + provider version pins
-│   ├── providers.tf       # AWS provider config, default tags
-│   ├── variables.tf
-│   ├── dynamodb.tf        # visitor counter table
-│   ├── iam.tf             # Lambda execution role + least-privilege policy
-│   ├── lambda.tf          # function resource, packaging
-│   ├── lambda/
-│   │   └── counter.py     # Lambda source
-│   ├── api_gateway.tf     # HTTP API, route, CORS
-│   ├── s3.tf              # private site bucket + policy
-│   ├── cloudfront.tf      # distribution + Origin Access Control
-│   ├── github_oidc.tf     # GitHub Actions OIDC provider + deploy role
-│   └── outputs.tf
-├── site/                  # the resume itself
-│   ├── index.html
-│   ├── style.css
-│   └── script.js
-└── .gitignore
-```
-
 ## How the counter works
-
+ 
 `script.js` sends `POST /count` on page load (a mutation, so POST — not GET, which browsers, crawlers, and preview bots can trigger unintentionally). Lambda runs a DynamoDB `UpdateItem` with an atomic `ADD`, which self-initializes the counter on the very first call — no seed value needed. CORS is enforced at API Gateway, not inside the Lambda, so it's centralized and correct for every response path, including errors.
+ 
+## Monitoring & alerting
+ 
+Three CloudWatch alarms watch the stack and publish to a single SNS topic, which fans out to a small `notify-slack` Lambda that posts a formatted message to a Slack channel via an incoming webhook:
+ 
+- **Lambda errors** — a static threshold (`>= 1` error in 60 seconds). There's no such thing as a "usual" number of crashes, so even one is worth knowing about immediately.
+- **API latency** — anomaly detection on API Gateway's `Latency` metric. Instead of guessing a fixed millisecond threshold, CloudWatch learns the normal range from about two weeks of traffic and alarms when latency falls outside it.
+- **Lambda invocation volume** — anomaly detection on `Invocations`, same reasoning: catches an unusual spike (or silence) without a hand-picked number that would either be too tight for normal traffic or too loose to catch a real problem.
+Both anomaly alarms require several consecutive breaching data points before firing, since a low-traffic site's metrics are noisy in relative terms — one visitor instead of zero can look like a huge spike. Every alarm reports both `ALARM` and `OK` transitions to Slack, so a resolved incident is as visible as the original alert.
 
 ## Security decisions
 
@@ -96,6 +88,12 @@ Every layer of this stack was built with least privilege as the default, not an 
 - Bucket versioning is enabled, so an accidental overwrite or delete of a site file is recoverable.
 - `viewer_protocol_policy = "redirect-to-https"` forces every visitor connection to HTTPS, even if they type `http://`.
 
+**Monitoring & alerting — SNS + CloudWatch + Slack**
+- The SNS topic policy grants `sns:Publish` to only `cloudwatch.amazonaws.com`, with an `aws:SourceAccount` condition scoping it to this account — no other AWS account's alarms can publish to this topic.
+- `aws_lambda_permission` scopes the invoke grant to SNS on this one topic's ARN — the same "who's allowed to invoke in" rule seen everywhere else in this stack (API Gateway → visitor-counter, SNS → notify-slack), applied a second time.
+- The notify-slack Lambda's role has no DynamoDB, S3, or CloudFront permissions at all — a compromise of the alerting path can't touch the site or its data.
+- The Slack webhook URL is set out-of-band via the AWS CLI, kept out of every `.tf` file and out of `terraform.tfstate` entirely — see **Monitoring & alerting** above for the full reasoning and trade-off.
+  
 **CI/CD — GitHub Actions → AWS**
 - No static AWS access keys stored anywhere in GitHub. Authentication is OIDC federation: GitHub mints a short-lived signed token per workflow run, AWS verifies it against a registered identity provider, and hands back credentials that expire in about an hour.
 - The OIDC provider's `client_id_list` restricts the token's audience to `sts.amazonaws.com`, so a token minted for some other purpose can't be replayed here.
